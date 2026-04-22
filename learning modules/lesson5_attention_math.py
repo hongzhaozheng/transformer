@@ -19,11 +19,16 @@ d_model = 6
 d_k = 3
 
 
-print("\n=== Lesson 5: Attention Prep ===")
-
-
-print("\n=== Section A: Tensor Shape Drills ===")
-
+# Section A: Tensor Shape Drills
+# Print and verify:
+# - token_ids shape -> [batch_size, seq_len]
+# - embeddings shape -> [batch_size, seq_len, d_model]
+#
+# Shape meanings:
+# [batch_size, seq_len] means one token id per position in each sequence.
+# [batch_size, seq_len, d_model] means one feature vector per token position.
+# [batch_size, seq_len, seq_len] means each token attends to every token position.
+# [batch_size, seq_len, d_model] output means each position gets a new mixed feature vector.
 token_ids = torch.tensor([
     [0, 1, 2, 3],
     [4, 5, 6, 7],
@@ -31,86 +36,92 @@ token_ids = torch.tensor([
 
 embeddings = torch.randn(batch_size, seq_len, d_model)
 
-print("token_ids shape:", tuple(token_ids.shape), "-> [batch_size, seq_len]")
-print("embeddings shape:", tuple(embeddings.shape), "-> [batch_size, seq_len, d_model]")
 
-print("\nShape meanings:")
-print("[batch_size, seq_len] means one token id per position in each sequence.")
-print("[batch_size, seq_len, d_model] means one feature vector per token position.")
-print("[batch_size, seq_len, seq_len] means each token attends to every token position.")
-print("[batch_size, seq_len, d_model] output means each position gets a new mixed feature vector.")
-
-
-print("\n=== Section B: Attention Math Warm-Up ===")
-
+# Section B: Attention Math Warm-Up
+# Create:
+# - Q with shape [batch_size, seq_len, d_k]
+# - K with shape [batch_size, seq_len, d_k]
+# - V with shape [batch_size, seq_len, d_model]
+#
+# Print and verify:
+# - Q shape -> [batch_size, seq_len, d_k]
+# - K shape -> [batch_size, seq_len, d_k]
+# - V shape -> [batch_size, seq_len, d_model]
+#
+# Compute attention scores by comparing each query with every key.
+# Think about which dimensions need to line up for batched matrix multiplication.
+#
+# Verify scores shape:
+# [batch_size, seq_len, seq_len]
+#
+# Scale the scores using sqrt(d_k).
+#
+# Apply softmax over the last dimension to get attention weights.
+# Verify weights shape:
+# [batch_size, seq_len, seq_len]
+#
+# Check that each row sums to 1.
+#
+# Use the attention weights to combine information from V.
+# The final output should keep one feature vector per token position.
+#
+# Verify output shape:
+# [batch_size, seq_len, d_model]
 Q = torch.randn(batch_size, seq_len, d_k)
 K = torch.randn(batch_size, seq_len, d_k)
 V = torch.randn(batch_size, seq_len, d_model)
+print(f"Q shape -> ", tuple(Q.shape))
+print(f"K shape -> ", tuple(K.shape))
+print(f"V shape -> ", tuple(V.shape))
 
-print("Q shape:", tuple(Q.shape), "-> [batch_size, seq_len, d_k]")
-print("K shape:", tuple(K.shape), "-> [batch_size, seq_len, d_k]")
-print("V shape:", tuple(V.shape), "-> [batch_size, seq_len, d_model]")
-
-scores = Q @ K.transpose(-2, -1)
-
-print("scores shape:", tuple(scores.shape), "-> [batch_size, seq_len, seq_len]")
-print("Example raw score matrix:")
-print(scores[0])
+scores = Q @ K.transpose(-2,-1)
+print(f"scores shape -> ", tuple(scores.shape))
 
 scaled_scores = scores / math.sqrt(d_k)
 
-print("scaled_scores shape:", tuple(scaled_scores.shape))
-
 weights = F.softmax(scaled_scores, dim=-1)
-
-print("weights shape:", tuple(weights.shape), "-> [batch_size, seq_len, seq_len]")
-print("Example attention weight matrix:")
-print(weights[0])
-print("Row sums for first example:")
-print(weights[0].sum(dim=-1))
+print(f"weights shape -> ", tuple(weights.shape))
+print(weights.sum(-1)[0])
 
 output = weights @ V
+print(f"output shape -> ", tuple(output.shape))
 
-print("output shape:", tuple(output.shape), "-> [batch_size, seq_len, d_model]")
-print("Example output row:")
-print(output[0, 0])
-
-
-print("\n=== Section C: Causal Masking ===")
-
-mask = torch.tril(torch.ones(seq_len, seq_len))
-print("Lower-triangular mask:")
-print(mask)
+# Section C: Causal Masking
+# Create a lower-triangular mask with shape [seq_len, seq_len].
+# This allows each token to attend only to itself and earlier positions.
+#
+# Convert it into a boolean future mask where future positions are True.
+#
+# Apply the mask to scaled_scores using masked_fill.
+# Fill masked positions with negative infinity so softmax gives them zero weight.
+#
+# Hint:
+# masked_scores should still have shape [batch_size, seq_len, seq_len]
+#
+# Apply softmax again to get masked_weights.
+# Verify that each row still sums to 1.
+#
+# Use the masked attention weights to combine V again.
+#
+# Verify masked_output shape:
+# [batch_size, seq_len, d_model]
+mask = torch.tril(torch.ones(seq_len,seq_len))
 
 future_mask = mask == 0
-print("Boolean future mask:")
-print(future_mask)
-
 masked_scores = scaled_scores.masked_fill(future_mask.unsqueeze(0), float("-inf"))
-
-print("masked_scores shape:", tuple(masked_scores.shape))
-print("Example masked score matrix:")
-print(masked_scores[0])
-
 masked_weights = F.softmax(masked_scores, dim=-1)
-
-print("masked_weights shape:", tuple(masked_weights.shape))
-print("Example masked attention weights:")
-print(masked_weights[0])
-print("Masked row sums for first example:")
-print(masked_weights[0].sum(dim=-1))
+print(masked_weights.sum(-1)[0])
 
 masked_output = masked_weights @ V
-
-print("masked_output shape:", tuple(masked_output.shape), "-> [batch_size, seq_len, d_model]")
-
-
-print("\n=== Section D: Reflection ===")
-print("Attention scores are [batch, seq_len, seq_len] because each position compares against every position.")
-print("We scale by sqrt(d_k) to keep dot products from growing too large before softmax.")
-print("We need a causal mask so position t cannot use information from future tokens.")
+print("masked_output shape -> ", tuple(masked_output.shape))
 
 
-print("\n=== Next Lesson Preview ===")
-print("Next we can wrap this math into one self-attention head,")
-print("then build toward a minimal decoder-only Transformer.")
+# Section D: Reflection
+# Why are attention scores [batch, seq_len, seq_len]?
+# Why do we divide by sqrt(d_k)?
+# Why does a causal mask prevent looking into the future?
+
+
+# Next Lesson Preview
+# Wrap this math into one self-attention head.
+# Then build toward a minimal decoder-only Transformer.

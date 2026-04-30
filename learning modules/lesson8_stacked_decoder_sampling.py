@@ -106,6 +106,62 @@ print(f"Sample input: {X[0]}, sample target: {Y[0]}")
 #   x = x + attention(layer_norm_1(x))
 #   x = x + feed_forward(layer_norm_2(x))
 
+class SingleHeadSelfAttention(nn.Module):
+    def __init__(self, d_model, head_size, block_size):
+        super().__init__()
+        self.q = nn.Linear(d_model, head_size)
+        self.k = nn.Linear(d_model, head_size)
+        self.v = nn.Linear(d_model, head_size)
+        self.register_buffer("mask", torch.tril(torch.ones(block_size,block_size)))
+
+    def forward(self, x):
+        q = self.q(x)
+        k = self.k(x)
+        v = self.v(x)
+        _, T, head_size = q.shape
+        scores = q @ k.transpose(-2,-1) / math.sqrt(head_size)
+        masked = torch.masked_fill(scores, self.mask[:T,:T] == 0, float("-inf"))
+        weights = torch.softmax(masked, dim = -1)
+        return weights @ v
+
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, d_model, num_heads, block_size):
+        super().__init__()
+        assert d_model % num_heads == 0
+        head_size = d_model // num_heads
+        self.heads = nn.ModuleList([
+            SingleHeadSelfAttention(d_model, head_size, block_size)
+            for _ in range(num_heads)
+        ])
+        self.linear = nn.Linear(d_model, d_model)
+    
+    def forward(self, x):
+        heads = [head(x) for head in self.heads]
+        out = torch.cat(heads, dim = -1)
+        return self.linear(out)
+
+class FeedForward(nn.Module):
+    def __init__(self, d_model, hidden_size):
+        super().__init__()
+        self.l1 = nn.Linear(d_model, hidden_size)
+        self.relu = nn.ReLU()
+        self.l2 = nn.Linear(hidden_size, d_model)
+
+    def forward(self, x):
+        return self.l2(self.relu(self.l1(x)))
+
+class DecoderBlock(nn.Module):
+    def __init__(self, d_model, num_heads, block_size, hidden_size):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.attention = MultiHeadSelfAttention(d_model, num_heads, block_size)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.ff = FeedForward(d_model, hidden_size)
+
+    def forward(self, x):
+        x = x + self.attention(self.norm1(x))
+        x = x + self.ff(self.norm2(x))
+        return x
 
 # Section C: Stacked Decoder-Only Language Model
 # Upgrade TinyDecoderLM so it uses multiple DecoderBlock modules.
@@ -143,6 +199,7 @@ print(f"Sample input: {X[0]}, sample target: {Y[0]}")
 # Shape target:
 # idx:    [B, T]
 # logits: [B, T, vocab_size]
+
 
 
 # Section D: Smoke Test

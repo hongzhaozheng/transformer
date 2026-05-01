@@ -200,7 +200,28 @@ class DecoderBlock(nn.Module):
 # idx:    [B, T]
 # logits: [B, T, vocab_size]
 
+class StackedDecoderLM(nn.Module):
+    def __init__(self, vocab_size, block_size, d_model, num_heads, hidden_size, num_layers):
+        super().__init__()
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
+        self.pos_embedding = nn.Embedding(block_size, d_model)
+        self.decoder = nn.ModuleList([
+            DecoderBlock(d_model, num_heads, block_size, hidden_size)
+            for _ in range(num_layers)
+        ])
+        self.norm = nn.LayerNorm(d_model)
+        self.linear = nn.Linear(d_model, vocab_size)
 
+    def forward(self, idx):
+        T = idx.shape[-1]
+        token_embedding = self.token_embedding(idx)
+        pos_id = torch.arange(T, device = idx.device)
+        pos_embedding = self.pos_embedding(pos_id)
+        x = token_embedding + pos_embedding
+        for decoder in self.decoder:
+            x = decoder(x)
+        logits = self.linear(self.norm(x))
+        return logits
 
 # Section D: Smoke Test
 # After implementing StackedDecoderLM:
@@ -216,6 +237,11 @@ class DecoderBlock(nn.Module):
 # - input batch shape: [batch_size, block_size]
 # - output logits shape: [batch_size, block_size, vocab_size]
 
+model = StackedDecoderLM(vocab_size, block_size, d_model, num_heads, hidden_size, num_layers)
+X, Y = next(iter(loader))
+logits = model(X)
+print(f"input batch shape: {X.shape}")
+print(f"output logits shape: {logits.shape}")
 
 # Section E: Training Step
 # Train the stacked decoder model for next-token prediction.
@@ -237,6 +263,22 @@ class DecoderBlock(nn.Module):
 # - compare the loss curve with the one-block model from Lesson 7
 # - notice whether the deeper model overfits this tiny dataset faster
 
+opt = torch.optim.AdamW(model.parameters(), lr = learning_rate)
+loss_fn = nn.CrossEntropyLoss()
+for epoch in range(epochs):
+    total_loss = 0
+    for step, (X,Y) in enumerate(loader):
+        logits = model(X)
+        loss = loss_fn(logits.reshape(-1, logits.shape[-1]), Y.reshape(-1))
+        total_loss += loss.item()
+
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+    average_loss = total_loss / len(loader)
+    print(f"Epoch {epoch}, total loss: {total_loss}, average loss: {average_loss}")
+
 
 # Section F: Greedy Generation Review
 # Recreate greedy generation from Lesson 7.
@@ -251,6 +293,23 @@ class DecoderBlock(nn.Module):
 # - append the decoded character
 #
 # Return the generated string.
+
+def GreedyGeneration(seed_text, block_size, stoi, itos, steps):
+    generated = seed_text
+    model.eval()
+    with torch.no_grad():
+        for step in range(steps):
+            context = generated[-block_size:]
+            context_id = [[stoi[ch] for ch in context]]
+            X = torch.tensor(context_id, dtype = torch.long)
+            logits = model(X)
+            pred = torch.argmax(logits[:,-1,:], dim = -1)
+            next_char = itos[pred.item()]
+            generated += next_char
+
+    return generated 
+
+seed_text = text[:block_size]
 
 
 # Section G: Temperature Sampling
@@ -281,6 +340,24 @@ class DecoderBlock(nn.Module):
 #
 # Watch how the output changes.
 
+def sample_text(seed_text, model, stoi, itos, block_size, steps, temperature):
+    generated = seed_text
+    model.eval()
+    with torch.no_grad():
+        for step in range(steps):
+            context = generated[-block_size:]
+            context_id = [[stoi[ch] for ch in context]]
+            X = torch.tensor(context_id, dtype = torch.long)
+            logits = model(X) 
+            logits = logits[:,-1,:] / temperature
+            prob = F.softmax(logits, dim = -1)
+            next_id = torch.multinomial(prob, num_samples = 1)
+            next_char = itos[next_id.item()]
+            generated += next_char
+
+    return generated 
+
+
 
 # Section H: Compare Generation Methods
 # Print generated text from:
@@ -296,6 +373,10 @@ class DecoderBlock(nn.Module):
 # - Which output is most random?
 # - Which one looks most like the training text?
 
+print(GreedyGeneration(seed_text, block_size, stoi, itos, generate_steps))
+print(sample_text(seed_text, model, stoi, itos, block_size, generate_steps, temperature = 0.5))
+print(sample_text(seed_text, model, stoi, itos, block_size, generate_steps, temperature = 1.0))
+print(sample_text(seed_text, model, stoi, itos, block_size, generate_steps, temperature = 1.5))
 
 # Reflection
 # Why does stacking decoder blocks keep the shape [batch, seq_len, d_model]?

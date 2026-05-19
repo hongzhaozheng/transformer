@@ -105,7 +105,25 @@ print(f"Sample input: {X[0]}, sample output: {Y[0]}")
 # input:  [B, T, d_model]
 # output: [B, T, head_size]
 
+class SingleHeadSelfAttention(nn.Module):
+    def __init__(self, d_model, head_size, block_size, dropout):
+        super().__init__()
+        self.q = nn.Linear(d_model, head_size)
+        self.k = nn.Linear(d_model, head_size)
+        self.v = nn.Linear(d_model, head_size)
+        self.register_buffer("mask", torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(dropout)
 
+    def forward(self, x):
+        q = self.q(x)
+        k = self.k(x)
+        v = self.v(x)
+        _, T, head_size = q.shape
+        scores = q @ k.transpose(-2, -1) / math.sqrt(head_size)
+        masked_scored = torch.masked_fill(scores, self.mask[:T, :T] == 0, float("-inf"))
+        weights = torch.softmax(masked_scored, dim = -1)
+        weights = self.dropout(weights)
+        return weights @ v
 
 # Section C: Multi-Head Attention With Output Dropout
 # Upgrade MultiHeadSelfAttention.
@@ -128,6 +146,23 @@ print(f"Sample input: {X[0]}, sample output: {Y[0]}")
 # - apply output dropout
 # - return [B, T, d_model]
 
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, d_model, num_heads, block_size, dropout):
+        super().__init__()
+        assert(d_model % num_heads == 0)
+        head_size = d_model // num_heads
+        self.heads = nn.ModuleList([
+            SingleHeadSelfAttention(d_model, head_size, block_size, dropout)
+            for _ in range(num_heads)
+        ])
+        self.linear = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x):
+        heads = [head(x) for head in self.heads]
+        out = torch.cat(heads, dim = -1)
+        return self.dropout(self.linear(out))
+
 
 # Section D: Feed-Forward With Dropout
 # Upgrade FeedForward.
@@ -144,6 +179,16 @@ print(f"Sample input: {X[0]}, sample output: {Y[0]}")
 # input:  [B, T, d_model]
 # output: [B, T, d_model]
 
+class FeedForward(nn.Module):
+    def __init__(self, d_model, hidden_size, dropout):
+        super().__init__()
+        self.fc1 = nn.Linear(d_model, hidden_size)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.dropout(self.fc2(self.relu(self.fc1(x))))
 
 # Section E: Decoder Block With Dropout
 # Upgrade DecoderBlock so it passes dropout into attention and feed-forward.
@@ -152,6 +197,18 @@ print(f"Sample input: {X[0]}, sample output: {Y[0]}")
 # x = x + attention(norm1(x))
 # x = x + feed_forward(norm2(x))
 
+class DecoderBlock(nn.Module):
+    def __init__(self, d_model, num_heads, block_size, hidden_size, dropout):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.attention = MultiHeadSelfAttention(d_model, num_heads, block_size, dropout)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.feed_forward = FeedForward(d_model, hidden_size, dropout)
+
+    def forward(self, x):
+        x = x + self.attention(self.norm1(x))
+        x = x + self.feed_forward(self.norm2(x))
+        return x
 
 # Section F: Reusable Stacked Decoder LM
 # Create a cleaner model class that stores its own block_size.
@@ -190,7 +247,36 @@ print(f"Sample input: {X[0]}, sample output: {Y[0]}")
 # - apply lm head
 # - return logits [B, T, vocab_size]
 
+class TinyTransformerLM(nn.Module):
+    def __init__(self, vocab_size, block_size, d_model, num_heads, hidden_size, num_layers, dropout):
+        super().__init__()
+        self.block_size = block_size
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
+        self.pos_embedding = nn.Embedding(block_size, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.decoder = nn.ModuleList([
+            DecoderBlock(d_model, num_heads, block_size, hidden_size, dropout)
+            for _ in range(num_layers)
+        ])
+        self.norm = nn.LayerNorm(d_model)
+        self.linear = nn.Linear(d_model, vocab_size)
 
+    def forward(self, idx):
+        T = idx.shape[-1]
+        if T > self.block_size:
+            raise ValueError("idx length exceeds block_size")
+        
+        token_embedding = self.token_embedding(idx)
+        pos_id = torch.arange(T, device=idx.device)
+        pos_embedding = self.pos_embedding(pos_id)
+        embedding = self.dropout(token_embedding + pos_embedding)
+        x = embedding
+        for block in self.decoder:
+            x = block(x)
+        output = self.linear(self.norm(x))
+        return output
+
+        
 # Section G: Smoke Test
 # Instantiate TinyTransformerLM.
 # Pull one batch from the loader.
@@ -202,6 +288,11 @@ print(f"Sample input: {X[0]}, sample output: {Y[0]}")
 # input batch shape: [batch_size, block_size]
 # logits shape:      [batch_size, block_size, vocab_size]
 
+model = TinyTransformerLM(vocab_size, block_size, d_model, num_heads, hidden_size, num_layers, dropout)
+X,Y = next(iter(loader))
+logits = model(X)
+print(f"input batch shape {X.shape}")
+print(f"logits shape {logits.shape}")
 
 # Section H: Train/Eval Dropout Check
 # Verify dropout behavior before training.
@@ -224,6 +315,16 @@ print(f"Sample input: {X[0]}, sample output: {Y[0]}")
 # - train mode should usually be False because dropout is active
 # - eval mode should be True because dropout is disabled
 
+model.train()
+logits1 = model(X)
+logits2 = model(X)
+
+model.eval()
+logits3 = model(X)
+logits4 = model(X)
+
+print(torch.allclose(logits1, logits2))
+print(torch.allclose(logits3, logits4))
 
 # Section I: Training Step
 # Train the model for next-token prediction.
@@ -237,6 +338,27 @@ print(f"Sample input: {X[0]}, sample output: {Y[0]}")
 #
 # Print average loss every 20 epochs.
 
+opt = torch.optim.Adam(model.parameters(), lr = learning_rate)
+loss_fn = nn.CrossEntropyLoss()
+model.train()
+for epoch in range(epochs):
+    total_loss = 0
+
+    for X, Y in loader:
+        logits = model(X)
+        loss = loss_fn(
+            logits.reshape(-1, logits.shape[-1]),
+            Y.reshape(-1)
+        )
+        total_loss += loss.item()
+
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    
+    avg_loss = total_loss / len(loader)
+    if epoch % 20 == 0:
+        print(f"Epoch: {epoch}, average loss: {avg_loss}")
 
 # Section J: Cleaner Greedy Generation
 # Write a generation helper that does not depend on a global model.
@@ -251,6 +373,21 @@ print(f"Sample input: {X[0]}, sample output: {Y[0]}")
 # - last-position logits
 # - argmax
 
+def greedy_generate(seed_text, model, stoi, itos, steps):
+    generated = seed_text
+    model.eval()
+    with torch.no_grad():
+        for step in range(steps):
+            context = generated[-model.block_size:]
+            context_id = torch.tensor([[stoi[ch] for ch in context]], dtype = torch.long)
+            logits = model(context_id)
+            pred = torch.argmax(logits[:,-1,:],dim=-1).item()
+            generated += itos[pred]
+    
+    return generated
+
+seed_text = text[:model.block_size]
+print(greedy_generate(seed_text, model, stoi, itos, generate_steps))
 
 # Section K: Cleaner Temperature Sampling
 # Write:
@@ -271,6 +408,24 @@ print(f"Sample input: {X[0]}, sample output: {Y[0]}")
 # - temperature = 1.0
 # - temperature = 1.5
 
+def sample_text(seed_text, model, stoi, itos, steps, temperature):
+    generated = seed_text
+    model.eval()
+    with torch.no_grad():
+        for step in range(steps):
+            context = generated[-model.block_size:]
+            context_id = torch.tensor([[stoi[ch] for ch in context]], dtype = torch.long)
+            logits = model(context_id) 
+            last_logits = logits[:, -1, :]
+            probs = torch.softmax(last_logits / temperature, dim = -1)
+            pred = torch.multinomial(probs, num_samples = 1)
+            generated += itos[pred.item()]
+    
+    return generated
+
+print(sample_text(seed_text, model, stoi, itos, generate_steps, 0.5))
+print(sample_text(seed_text, model, stoi, itos, generate_steps, 1.0))
+print(sample_text(seed_text, model, stoi, itos, generate_steps, 1.5))
 
 # Reflection
 # What changes when model.train() is active?
